@@ -140,10 +140,11 @@ int mm_init(void)
     PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // prologue header
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // prologue footer
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));// epilogue header
-    // 실제 블록은 프롤로그 블록 바로 뒤
+    
+    // 실제 블록(페이로드)은 프롤로그 블록 바로 뒤
     heap_listp += (2 * WSIZE);
     
-    /* 힙을 확장하여 초기 가용 공간 확보 */
+    /* 힙을 확장하여 초기 가용 공간 확보 4KB */
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
         return -1;
     }
@@ -155,7 +156,6 @@ static void *find_fit(size_t asize){
 
     for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
     {
-
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
             return bp;
         }

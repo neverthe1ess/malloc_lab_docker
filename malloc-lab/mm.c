@@ -63,7 +63,8 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-static char *heap_listp = NULL;
+static char *heap_listp = 0;
+static char *pivot = 0;
 
 /*
  * extend_heap 함수 - 힙이 초기화 될 때와 mm_malloc이 적당한 fit을 찾지 못했을 때 호출
@@ -143,7 +144,9 @@ int mm_init(void)
     
     // 실제 블록(페이로드)은 프롤로그 블록 바로 뒤
     heap_listp += (2 * WSIZE);
-    
+    // 처음 가용 블록의 페이로드가 기준 원소가 됨
+    pivot = heap_listp;
+
     /* 힙을 확장하여 초기 가용 공간 확보 4KB */
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
         return -1;
@@ -154,12 +157,21 @@ int mm_init(void)
 static void *find_fit(size_t asize){
     void *bp;
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    // 다음 페이로드 시작 포인터 반복해서 가리키는 코드
+    for (bp = pivot; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
     {
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
             return bp;
         }
     }
+
+    for (bp = heap_listp; bp < pivot; bp = NEXT_BLKP(bp))
+    {
+        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+            return bp;
+        }
+    }
+    
     return NULL;
 }
 
@@ -170,13 +182,14 @@ static void place(void *bp, size_t asize){
     if ((csize - asize) >= (2 * DSIZE)){
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize - asize, 0));
         PUT(FTRP(bp), PACK(csize - asize, 0));
+        pivot = bp;
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+        pivot = NEXT_BLKP(bp);
     }
 }
 
@@ -231,7 +244,8 @@ void mm_free(void *ptr)
     size_t size = GET_SIZE(HDRP(ptr));
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    coalesce(ptr);
+    void *nbp = coalesce(ptr);
+    pivot = nbp;
 }
 
 /*

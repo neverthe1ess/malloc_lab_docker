@@ -156,23 +156,25 @@ int mm_init(void)
 
 static void *find_fit(size_t asize){
     void *bp;
+    void *best_bp = NULL;
+    size_t min_gap = (size_t) - 1;
+    size_t gap = 0;
 
     // 다음 페이로드 시작 포인터 반복해서 가리키는 코드
-    for (bp = pivot; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
     {
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
-            return bp;
+            gap = GET_SIZE(HDRP(bp)) - asize;
+            if(gap < min_gap){
+                min_gap = gap;
+                best_bp = bp;
+            }
         }
     }
-
-    for (bp = heap_listp; bp < pivot; bp = NEXT_BLKP(bp))
-    {
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
-            return bp;
-        }
+    if(min_gap == (size_t) - 1){
+        return NULL;
     }
-    
-    return NULL;
+    return best_bp;
 }
 
 static void place(void *bp, size_t asize){

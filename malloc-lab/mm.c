@@ -144,7 +144,7 @@ int mm_init(void)
     
     // 실제 블록(페이로드)은 프롤로그 블록 바로 뒤
     heap_listp += (2 * WSIZE);
-    // 처음 가용 블록의 페이로드가 기준 원소가 됨
+    // 처음 가용 블록의 페이로드가 기준 원소가 됨(next-fit)
     pivot = heap_listp;
 
     /* 힙을 확장하여 초기 가용 공간 확보 4KB */
@@ -248,22 +248,147 @@ void mm_free(void *ptr)
     pivot = nbp;
 }
 
+static size_t adjust(size_t size){
+    size_t asize = 0;
+    if(size <= DSIZE){
+        asize = DSIZE * 2;
+    } else {
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+    }
+    return asize;
+}
+
+
+
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
     void *newptr;
-    size_t copySize;
+    /* 기저 조건 */
+    if(ptr == NULL){
+        newptr = mm_malloc(size);
+        return newptr;
+    }
 
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
+    if(size == 0){
+        mm_free(ptr);
         return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    }
+
+    void *oldptr = ptr;
+    size_t copySize; 
+    size_t leftSize = GET_SIZE(HDRP(PREV_BLKP(ptr)));
+    size_t rightSize = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+    size_t current_size = GET_SIZE(HDRP(ptr));
+    size_t asize = adjust(size);
+
+    /* 요청한 사이즈가 원래 할당된 블록보다 작거나 같으면 */
+    if(asize <= current_size){
+        size_t remainder = current_size - asize;
+        /* 남은 블록이 최소 블록 크기(16바이트)가 넘는다면 분할 */
+        if(remainder >= 2 * DSIZE){
+            // 현재 블록을 asize로 축소
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            
+            // 남은 부분을 가용 블록으로 만들기
+            void *next = NEXT_BLKP(ptr);
+            PUT(HDRP(next), PACK(remainder, 0));
+            PUT(FTRP(next), PACK(remainder, 0));
+            
+            // 가용 블록 병합 시도 및 pivot 업데이트
+            pivot = coalesce(next);
+        }
+        return ptr;
+    } else {
+        /* 요청한 사이즈가 원래 할당된 블록보다 클 때*/
+        /* case 1. 오른쪽 블록이 가용 블록이면서 현재 + 오른쪽 합칠 때 크기 충분 */
+        if(!GET_ALLOC(HDRP(NEXT_BLKP(ptr))) && asize <= current_size + rightSize){
+            size_t newsize = current_size + rightSize;
+            PUT(HDRP(ptr), PACK(newsize, 1));
+            PUT(FTRP(ptr), PACK(newsize, 1));
+            
+            // 남은 공간이 있으면 분할
+            size_t remainder = newsize - asize;
+            if(remainder >= 2 * DSIZE){
+                PUT(HDRP(ptr), PACK(asize, 1));
+                PUT(FTRP(ptr), PACK(asize, 1));
+                void *next = NEXT_BLKP(ptr);
+                PUT(HDRP(next), PACK(remainder, 0));
+                PUT(FTRP(next), PACK(remainder, 0));
+                pivot = next;
+            }
+            return ptr;
+        } 
+        
+        /* case 2. 왼쪽 블록이 가용 블록이면서 왼쪽 + 현재 합칠 때 크기 충분 */
+        else if(!GET_ALLOC(HDRP(PREV_BLKP(ptr))) && asize <= current_size + leftSize) {
+            size_t newsize = current_size + leftSize;
+            void *prev = PREV_BLKP(ptr);
+            
+            // 데이터 복사 (memmove로 안전하게)
+            size_t old_payload = current_size - 2 * WSIZE;
+            size_t copySize = (size < old_payload) ? size : old_payload;
+            memmove(prev, ptr, copySize);
+            
+            // 병합된 블록 할당
+            PUT(HDRP(prev), PACK(newsize, 1));
+            PUT(FTRP(prev), PACK(newsize, 1));
+            
+            // 남은 공간이 있으면 분할
+            size_t remainder = newsize - asize;
+            if(remainder >= 2 * DSIZE){
+                PUT(HDRP(prev), PACK(asize, 1));
+                PUT(FTRP(prev), PACK(asize, 1));
+                void *next = NEXT_BLKP(prev);
+                PUT(HDRP(next), PACK(remainder, 0));
+                PUT(FTRP(next), PACK(remainder, 0));
+                pivot = next;
+            }
+            return prev;
+        } 
+        
+        /* case 3. 왼쪽, 오른쪽 가용 블록이고 왼쪽 + 현재 + 오른쪽 합치면 충분 */
+        else if(!GET_ALLOC(HDRP(PREV_BLKP(ptr))) && !GET_ALLOC(HDRP(NEXT_BLKP(ptr))) 
+                && asize <= current_size + leftSize + rightSize) {
+            size_t newsize = current_size + leftSize + rightSize;
+            void *prev = PREV_BLKP(ptr);
+            
+            // 데이터 복사
+            size_t old_payload = current_size - 2 * WSIZE;
+            size_t copySize = (size < old_payload) ? size : old_payload;
+            memmove(prev, ptr, copySize);
+            
+            // 병합된 블록 할당
+            PUT(HDRP(prev), PACK(newsize, 1));
+            PUT(FTRP(prev), PACK(newsize, 1));
+            
+            // 남은 공간이 있으면 분할
+            size_t remainder = newsize - asize;
+            if(remainder >= 2 * DSIZE){
+                PUT(HDRP(prev), PACK(asize, 1));
+                PUT(FTRP(prev), PACK(asize, 1));
+                void *next = NEXT_BLKP(prev);
+                PUT(HDRP(next), PACK(remainder, 0));
+                PUT(FTRP(next), PACK(remainder, 0));
+                pivot = next;
+            }
+            return prev;
+        } 
+        
+        /* case 4. 주변 가용 블록이 없거나 합쳐도 크기가 모자라면 */
+        else {
+            newptr = mm_malloc(size);
+            if (newptr == NULL)
+                return NULL;
+            copySize = GET_SIZE(HDRP(oldptr)) - 2 * WSIZE;
+            if (size < copySize)
+                copySize = size;
+            memmove(newptr, oldptr, copySize);
+            mm_free(oldptr);
+            return newptr;
+        }
+    }
 }

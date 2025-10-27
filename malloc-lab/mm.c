@@ -20,6 +20,7 @@
 #define DSIZE 8
 #define CHUNKSIZE (1<<12)
 
+
 #define MAX(x, y) ((x) > (y)? (x) : (y))
 /* 크기와 할당 비트 통합 */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -38,6 +39,13 @@
 /* 다음과 이전 블록의 블록 포인터를 각각 리턴한다. */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+
+/* pred와 succ 위치와 업데이트 코드*/
+#define PRED(bp) (*(char **)(bp))
+#define SUCC(bp) (*(char **)(bp + DSIZE))
+
+#define PUT_PRED(bp, pred_ptr) (PRED(bp) = (pred_ptr))
+#define PUT_SUCC(bp, succ_ptr) (SUCC(bp) = (succ_ptr))
 
 /*********************************************************
  * NOTE TO STUDENTS: Before you do anything else, please
@@ -62,14 +70,58 @@ team_t team = {
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+#define PTRSIZE  (sizeof(void *))
+#define MINBLOCK (ALIGN(2 * WSIZE + 2 * PTRSIZE))
 
 static char *heap_listp = 0;
-static char *pivot = 0;
+static char *free_list_head = 0;
 
 /*
  * extend_heap 함수 - 힙이 초기화 될 때와 mm_malloc이 적당한 fit을 찾지 못했을 때 호출
  */
 
+static size_t adjust(size_t size){
+    size_t asize = ALIGN(size + 2 * WSIZE);
+    if (asize < MINBLOCK) asize = MINBLOCK;
+    return asize;
+}
+
+
+static void remove_from_free_list(void *bp){
+    void *pred_free_bp = PRED(bp);
+    void *succ_free_bp = SUCC(bp);
+
+    /* case 1. 프리 리스트 내 유일한 블록이라면 */
+    if(pred_free_bp == NULL && succ_free_bp == NULL){
+        free_list_head = NULL;
+    }
+
+    /* case 2. 프리 리스트 내 가장 앞 블록이라면(총 블록 개수 2개 이상) */
+    else if(pred_free_bp == NULL) {
+        free_list_head = succ_free_bp;
+        PUT_PRED(succ_free_bp, NULL);
+    }
+    /* case 3. 프리 리스트 내 가장 뒤 블록이라면 */
+    else if(succ_free_bp == NULL){
+        PUT_SUCC(pred_free_bp, NULL);
+    }
+
+    /* case 4. 프리 리스트 내 중간 블록이라면 */
+    else {
+        PUT_SUCC(pred_free_bp, succ_free_bp);
+        PUT_PRED(succ_free_bp, pred_free_bp);
+    }
+}
+
+static void add_to_free_list(void *bp){
+    PUT_SUCC(bp, free_list_head);
+    PUT_PRED(bp, NULL);
+
+    if(free_list_head != NULL){
+        PUT_PRED(free_list_head, bp);
+    }
+    free_list_head = bp;
+}
 
 /* 주변에 빈 블럭이 생겨날 가능성이 있으면 새로 생긴 블록과 병합 */
 static void *coalesce(void *bp){
@@ -78,12 +130,12 @@ static void *coalesce(void *bp){
     size_t size = GET_SIZE(HDRP(bp));
     
     /* case 1: 이전과 다음 블록이 모두 할당 상태일 때 */
-    if (prev_alloc && next_alloc){
-        return bp;
-    } 
-
+    if(prev_alloc && next_alloc){
+        // 아무것도 할 필요 없음
+    }
     /* case 2: 이전은 할당, 다음 블록은 가용 상태일 때 */
     else if(prev_alloc && !next_alloc){
+        remove_from_free_list(NEXT_BLKP(bp));
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         // 다음 블록의 푸터 위치(트릭)
@@ -92,18 +144,23 @@ static void *coalesce(void *bp){
 
     /* case 3: 이전은 가용 상태, 다음 블록은 할당 상태일 때 */
     else if(!prev_alloc && next_alloc){
+        remove_from_free_list(PREV_BLKP(bp));
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp); // 이전 블록이 시작 주소임
     }
 
+    /* case 4 : 이전은 가용 상태, 다음 블록은 가용 상태알 때*/
     else {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        remove_from_free_list(PREV_BLKP(bp));
+        remove_from_free_list(NEXT_BLKP(bp));
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
+    add_to_free_list(bp);
     return bp;
 }
 
@@ -121,7 +178,7 @@ static void *extend_heap(size_t words){
     PUT(HDRP(bp), PACK(size, 0)); // Header, 크기와 할당 상태 == 'free'
     PUT(FTRP(bp), PACK(size, 0)); // footer, 헤더와 동일한 정보
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // 새로운 에필로그 헤더 설정
-    
+
     /* 이전 블록이 가용 상태라면, 병합 */
     return coalesce(bp);
 }
@@ -144,8 +201,9 @@ int mm_init(void)
     
     // 실제 블록(페이로드)은 프롤로그 블록 바로 뒤
     heap_listp += (2 * WSIZE);
+
     // 처음 가용 블록의 페이로드가 기준 원소가 됨(next-fit)
-    pivot = heap_listp;
+    free_list_head = NULL;
 
     /* 힙을 확장하여 초기 가용 공간 확보 4KB */
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
@@ -161,9 +219,9 @@ static void *find_fit(size_t asize){
     size_t gap = 0;
 
     // 다음 페이로드 시작 포인터 반복해서 가리키는 코드
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    for (bp = free_list_head; bp != NULL; bp = SUCC(bp))
     {
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+        if(asize <= GET_SIZE(HDRP(bp))){
             gap = GET_SIZE(HDRP(bp)) - asize;
             if(gap < min_gap){
                 min_gap = gap;
@@ -179,19 +237,18 @@ static void *find_fit(size_t asize){
 
 static void place(void *bp, size_t asize){
     size_t csize = GET_SIZE(HDRP(bp));
-
+    remove_from_free_list(bp);
     /* 만약 남는 공간이 최소 블록 크기(16바이트) 이상이면 분할 */
-    if ((csize - asize) >= (2 * DSIZE)){
+    if ((csize - asize) >= MINBLOCK){
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize - asize, 0));
-        PUT(FTRP(bp), PACK(csize - asize, 0));
-        pivot = bp;
+        void *free_next_bp = NEXT_BLKP(bp);
+        PUT(HDRP(free_next_bp), PACK(csize - asize, 0));
+        PUT(FTRP(free_next_bp), PACK(csize - asize, 0));
+        free_next_bp = coalesce(free_next_bp);
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
-        pivot = NEXT_BLKP(bp);
     }
 }
 
@@ -214,12 +271,7 @@ void *mm_malloc(size_t size)
         return NULL;
     }
 
-    if(size <= DSIZE){
-        asize = 2 * DSIZE; // 최소 블록 크기는 16바이트
-    } else {
-        // 8바이트의 오버헤드(헤더/푸터)를 더하고, 8의 배수로 올림
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
-    }
+    asize = adjust(size);
 
     /* 2. 가용 블록 검색(first-fit)*/
     if((bp = find_fit(asize)) != NULL){
@@ -246,18 +298,7 @@ void mm_free(void *ptr)
     size_t size = GET_SIZE(HDRP(ptr));
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    void *nbp = coalesce(ptr);
-    pivot = nbp;
-}
-
-static size_t adjust(size_t size){
-    size_t asize = 0;
-    if(size <= DSIZE){
-        asize = DSIZE * 2;
-    } else {
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
-    }
-    return asize;
+    coalesce(ptr);
 }
 
 
@@ -290,7 +331,7 @@ void *mm_realloc(void *ptr, size_t size)
     if(asize <= current_size){
         size_t remainder = current_size - asize;
         /* 남은 블록이 최소 블록 크기(16바이트)가 넘는다면 분할 */
-        if(remainder >= 2 * DSIZE){
+        if(remainder >= MINBLOCK){
             // 현재 블록을 asize로 축소
             PUT(HDRP(ptr), PACK(asize, 1));
             PUT(FTRP(ptr), PACK(asize, 1));
@@ -300,33 +341,35 @@ void *mm_realloc(void *ptr, size_t size)
             PUT(HDRP(next), PACK(remainder, 0));
             PUT(FTRP(next), PACK(remainder, 0));
             
-            // 가용 블록 병합 시도 및 pivot 업데이트
-            pivot = coalesce(next);
+            // 가용 블록 병합 시도
+            coalesce(next);
         }
         return ptr;
     } else {
         /* 요청한 사이즈가 원래 할당된 블록보다 클 때*/
         /* case 1. 오른쪽 블록이 가용 블록이면서 현재 + 오른쪽 합칠 때 크기 충분 */
         if(!GET_ALLOC(HDRP(NEXT_BLKP(ptr))) && asize <= current_size + rightSize){
+            remove_from_free_list(NEXT_BLKP(ptr));
             size_t newsize = current_size + rightSize;
             PUT(HDRP(ptr), PACK(newsize, 1));
             PUT(FTRP(ptr), PACK(newsize, 1));
             
             // 남은 공간이 있으면 분할
             size_t remainder = newsize - asize;
-            if(remainder >= 2 * DSIZE){
+            if(remainder >= MINBLOCK){
                 PUT(HDRP(ptr), PACK(asize, 1));
                 PUT(FTRP(ptr), PACK(asize, 1));
                 void *next = NEXT_BLKP(ptr);
                 PUT(HDRP(next), PACK(remainder, 0));
                 PUT(FTRP(next), PACK(remainder, 0));
-                pivot = next;
+                coalesce(next);
             }
             return ptr;
         } 
         
         /* case 2. 왼쪽 블록이 가용 블록이면서 왼쪽 + 현재 합칠 때 크기 충분 */
         else if(!GET_ALLOC(HDRP(PREV_BLKP(ptr))) && asize <= current_size + leftSize) {
+            remove_from_free_list(PREV_BLKP(ptr));
             size_t newsize = current_size + leftSize;
             void *prev = PREV_BLKP(ptr);
             
@@ -341,13 +384,13 @@ void *mm_realloc(void *ptr, size_t size)
             
             // 남은 공간이 있으면 분할
             size_t remainder = newsize - asize;
-            if(remainder >= 2 * DSIZE){
+            if(remainder >= MINBLOCK){
                 PUT(HDRP(prev), PACK(asize, 1));
                 PUT(FTRP(prev), PACK(asize, 1));
                 void *next = NEXT_BLKP(prev);
                 PUT(HDRP(next), PACK(remainder, 0));
                 PUT(FTRP(next), PACK(remainder, 0));
-                pivot = next;
+                coalesce(next);
             }
             return prev;
         } 
@@ -355,6 +398,8 @@ void *mm_realloc(void *ptr, size_t size)
         /* case 3. 왼쪽, 오른쪽 가용 블록이고 왼쪽 + 현재 + 오른쪽 합치면 충분 */
         else if(!GET_ALLOC(HDRP(PREV_BLKP(ptr))) && !GET_ALLOC(HDRP(NEXT_BLKP(ptr))) 
                 && asize <= current_size + leftSize + rightSize) {
+            remove_from_free_list(PREV_BLKP(ptr));
+            remove_from_free_list(NEXT_BLKP(ptr));
             size_t newsize = current_size + leftSize + rightSize;
             void *prev = PREV_BLKP(ptr);
             
@@ -369,13 +414,13 @@ void *mm_realloc(void *ptr, size_t size)
             
             // 남은 공간이 있으면 분할
             size_t remainder = newsize - asize;
-            if(remainder >= 2 * DSIZE){
+            if(remainder >= MINBLOCK){
                 PUT(HDRP(prev), PACK(asize, 1));
                 PUT(FTRP(prev), PACK(asize, 1));
                 void *next = NEXT_BLKP(prev);
                 PUT(HDRP(next), PACK(remainder, 0));
                 PUT(FTRP(next), PACK(remainder, 0));
-                pivot = next;
+                coalesce(next);
             }
             return prev;
         } 

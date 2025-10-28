@@ -72,13 +72,34 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 #define PTRSIZE  (sizeof(void *))
 #define MINBLOCK (ALIGN(2 * WSIZE + 2 * PTRSIZE))
+#define NUM_CLASSES 16
 
 static char *heap_listp = 0;
-static char *free_list_head = 0;
+static char *free_list[NUM_CLASSES];
 
 /*
  * extend_heap 함수 - 힙이 초기화 될 때와 mm_malloc이 적당한 fit을 찾지 못했을 때 호출
  */
+
+ static int get_class_index(size_t size){
+    if(size <= 24) return 0;
+    else if (size <= 32)  return 1;
+    else if (size <= 64)  return 2;
+    else if (size <= 128) return 3;
+    else if (size <= 256) return 4;
+    else if (size <= 512) return 5;
+    else if (size <= 1024) return 6;
+    else if (size <= 2048) return 7;
+    else if (size <= 4096) return 8;
+    else if (size <= 8192) return 9;
+    else if (size <= 16384) return 10;
+    else if (size <= 32768) return 11;
+    else if (size <= 65536) return 12;
+    else if (size <= 131072) return 13;
+    else if (size <= 262144) return 14;
+    else return 15;
+ }
+
 
 static size_t adjust(size_t size){
     size_t asize = ALIGN(size + 2 * WSIZE);
@@ -90,15 +111,17 @@ static size_t adjust(size_t size){
 static void remove_from_free_list(void *bp){
     void *pred_free_bp = PRED(bp);
     void *succ_free_bp = SUCC(bp);
+    int class_idx = get_class_index(GET_SIZE(HDRP(bp)));
+
 
     /* case 1. 프리 리스트 내 유일한 블록이라면 */
     if(pred_free_bp == NULL && succ_free_bp == NULL){
-        free_list_head = NULL;
+        free_list[class_idx] = NULL;
     }
 
     /* case 2. 프리 리스트 내 가장 앞 블록이라면(총 블록 개수 2개 이상) */
     else if(pred_free_bp == NULL) {
-        free_list_head = succ_free_bp;
+        free_list[class_idx] = succ_free_bp;
         PUT_PRED(succ_free_bp, NULL);
     }
     /* case 3. 프리 리스트 내 가장 뒤 블록이라면 */
@@ -114,13 +137,15 @@ static void remove_from_free_list(void *bp){
 }
 
 static void add_to_free_list(void *bp){
-    PUT_SUCC(bp, free_list_head);
+    int class_idx = get_class_index(GET_SIZE(HDRP(bp)));
+
+    PUT_SUCC(bp, free_list[class_idx]);
     PUT_PRED(bp, NULL);
 
-    if(free_list_head != NULL){
-        PUT_PRED(free_list_head, bp);
+    if(free_list[class_idx] != NULL){
+        PUT_PRED(free_list[class_idx], bp);
     }
-    free_list_head = bp;
+    free_list[class_idx] = bp;
 }
 
 /* 주변에 빈 블럭이 생겨날 가능성이 있으면 새로 생긴 블록과 병합 */
@@ -203,7 +228,11 @@ int mm_init(void)
     heap_listp += (2 * WSIZE);
 
     // 처음 가용 블록의 페이로드가 기준 원소가 됨(next-fit)
-    free_list_head = NULL;
+    for (size_t i = 0; i < NUM_CLASSES; i++)
+    {
+        free_list[i] = NULL;
+    }
+    
 
     /* 힙을 확장하여 초기 가용 공간 확보 4KB */
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
@@ -214,25 +243,18 @@ int mm_init(void)
 
 static void *find_fit(size_t asize){
     void *bp;
-    void *best_bp = NULL;
-    size_t min_gap = (size_t) - 1;
-    size_t gap = 0;
+    int class_idx = get_class_index(asize);
 
-    // 다음 페이로드 시작 포인터 반복해서 가리키는 코드
-    for (bp = free_list_head; bp != NULL; bp = SUCC(bp))
-    {
-        if(asize <= GET_SIZE(HDRP(bp))){
-            gap = GET_SIZE(HDRP(bp)) - asize;
-            if(gap < min_gap){
-                min_gap = gap;
-                best_bp = bp;
-            }
+    /* asize가 속하는 클래스 뿐만 아니라 더 큰 클래스까지 찾아야 함 */
+    for (int i = class_idx; i < NUM_CLASSES; i++){
+        // 다음 페이로드 시작 포인터 반복해서 가리키는 코드(first-fit)
+        for (bp = free_list[i]; bp != NULL; bp = SUCC(bp)){
+            if(asize <= GET_SIZE(HDRP(bp))){
+                return bp;
+            }   
         }
     }
-    if(min_gap == (size_t) - 1){
-        return NULL;
-    }
-    return best_bp;
+    return NULL;
 }
 
 static void place(void *bp, size_t asize){

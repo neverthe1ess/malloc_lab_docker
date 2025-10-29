@@ -352,7 +352,7 @@ void *mm_realloc(void *ptr, size_t size)
     /* 요청한 사이즈가 원래 할당된 블록보다 작거나 같으면 */
     if(asize <= current_size){
         size_t remainder = current_size - asize;
-        /* 남은 블록이 최소 블록 크기(16바이트)가 넘는다면 분할 */
+        /* 남은 블록이 최소 블록 크기(24바이트)가 넘는다면 분할 */
         if(remainder >= MINBLOCK){
             // 현재 블록을 asize로 축소
             PUT(HDRP(ptr), PACK(asize, 1));
